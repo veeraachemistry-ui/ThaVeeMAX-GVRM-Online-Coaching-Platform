@@ -25,11 +25,34 @@ jobs:
           node-version: 20
 
       - name: Check Project Files
+        shell: pwsh
         run: |
+          Write-Host "Checking project files..."
+
           if (!(Test-Path "package.json")) {
-            Write-Error "package.json not found. Electron project setup is required."
+            Write-Error "package.json not found in repository root."
             exit 1
           }
+
+          if (!(Test-Path "main.js")) {
+            Write-Error "main.js not found in repository root."
+            exit 1
+          }
+
+          if (!(Test-Path "index.html")) {
+            Write-Error "index.html not found in repository root."
+            exit 1
+          }
+
+          Write-Host "Required project files found."
+
+      - name: Setup npm Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
 
       - name: Install Dependencies
         run: npm install
@@ -37,12 +60,28 @@ jobs:
       - name: Build Windows Installer
         run: npm run dist
 
+      - name: Verify EXE Output
+        shell: pwsh
+        run: |
+          if (!(Test-Path "release")) {
+            Write-Error "release folder not found."
+            exit 1
+          }
+
+          $files = Get-ChildItem -Path "release" -Filter "*.exe" -File
+
+          if (!$files) {
+            Write-Error "No EXE installer found in release folder."
+            exit 1
+          }
+
+          Write-Host "Windows installer created:"
+          $files | ForEach-Object { Write-Host $_.FullName }
+
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
           name: ThaVeeMAX-Windows-Installer
-          path: |
-            release/*.exe
-            dist/*.exe
+          path: release/*.exe
           if-no-files-found: error
           retention-days: 14
