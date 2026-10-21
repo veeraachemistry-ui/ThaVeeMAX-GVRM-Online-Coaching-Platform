@@ -1,0 +1,48 @@
+{
+  "name": "gvrm-cloud-lms",
+  "version": "1.0.0",
+  "description": "G.V.R.M. CLOUD LMS desktop offline-first starter",
+  "main": "main.js",
+  "author": "G.V.R.M. SOLUTIONS",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "in.gvrmsolutions.cloudlms",
+    "productName": "G.V.R.M. CLOUD LMS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "index.html",
+      "style.css",
+      "app.js",
+      "assets/**/*",
+      "README.md",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
