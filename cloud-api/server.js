@@ -3,49 +3,20 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
 import pg from 'pg';
-import Razorpay from 'razorpay';
 
 const { Pool } = pg;
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const required = ['DATABASE_URL','RAZORPAY_KEY_ID','RAZORPAY_KEY_SECRET','RAZORPAY_WEBHOOK_SECRET','RAZORPAY_PLAN_TEACHER','RAZORPAY_PLAN_INSTITUTION','RAZORPAY_PLAN_COACHING'];
+const required = ['DATABASE_URL'];
 const missing = required.filter(k => !process.env[k] || process.env[k].includes('REPLACE'));
 if (missing.length) console.warn('Payment API configuration incomplete:', missing.join(', '));
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined });
-const razorpay = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET ? new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET }) : null;
 const plans = {
-  teacher: { name: 'Teacher', amount: 49900, planId: () => process.env.RAZORPAY_PLAN_TEACHER },
-  institution: { name: 'Institution', amount: 99900, planId: () => process.env.RAZORPAY_PLAN_INSTITUTION },
-  coaching: { name: 'Coaching Centre', amount: 199900, planId: () => process.env.RAZORPAY_PLAN_COACHING }
+  teacher: { name: 'Teacher', amount: 49900 },
+  institution: { name: 'Institution', amount: 99900 },
+  coaching: { name: 'Coaching Centre', amount: 199900 }
 };
 
-await pool.query(`CREATE TABLE IF NOT EXISTS lms_subscriptions (
-  id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, plan_key TEXT NOT NULL,
-  razorpay_subscription_id TEXT UNIQUE, razorpay_customer_id TEXT,
-  status TEXT NOT NULL DEFAULT 'created', current_start BIGINT, current_end BIGINT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_event_id TEXT
-)`);
-
-// Razorpay webhook needs the exact raw request body for signature verification.
-app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const signature = req.header('x-razorpay-signature') || '';
-    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || '').update(req.body).digest('hex');
-    const supplied = Buffer.from(signature, 'utf8');
-    const expectedBuffer = Buffer.from(expected, 'utf8');
-    if (!signature || supplied.length !== expectedBuffer.length || !crypto.timingSafeEqual(supplied, expectedBuffer)) return res.status(400).send('Invalid webhook signature');
-    const event = JSON.parse(req.body.toString('utf8'));
-    const eventId = req.header('x-razorpay-event-id') || null;
-    const sub = event.payload?.subscription?.entity;
-    if (sub?.id) {
-      const statusMap = { 'subscription.activated': 'active', 'subscription.authenticated': 'authenticated', 'subscription.charged': 'active', 'subscription.pending': 'pending', 'subscription.halted': 'halted', 'subscription.cancelled': 'cancelled', 'subscription.completed': 'completed', 'subscription.paused': 'paused', 'subscription.resumed': 'active' };
-      const status = statusMap[event.event] || sub.status || 'unknown';
-      await pool.query(`UPDATE lms_subscriptions SET status=$1,current_start=$2,current_end=$3,updated_at=NOW(),last_event_id=$4 WHERE razorpay_subscription_id=$5`, [status, sub.current_start || null, sub.current_end || null, eventId, sub.id]);
-    }
-    res.json({ received: true });
-  } catch (e) { console.error('Webhook processing error:', e.message); res.status(500).send('Webhook processing failed'); }
-});
 app.use(express.json({ limit: '100kb' }));
 const allowed = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors({ origin(origin, cb) { if (!origin || allowed.length === 0 || allowed.includes(origin)) return cb(null, true); return cb(new Error('Origin not allowed by CORS')); } }));
@@ -194,40 +165,4 @@ app.post('/api/admin/activation-keys/:id/revoke', async (req,res) => {
 app.get('/api/health', (_req,res) => res.json({ ok: true, service: 'GVRM CLOUD LMS Payments API', paymentsConfigured: missing.length === 0 }));
 app.get('/api/plans', (_req,res) => res.json(Object.entries(plans).map(([key,p]) => ({ key, name:p.name, amount:p.amount/100, currency:'INR', interval:'monthly' }))));
 
-app.post('/api/subscriptions', async (req,res) => {
-  try {
-    if (!razorpay || missing.length) return res.status(503).json({ error: 'Payment gateway is not configured. Complete cloud-api/.env setup first.' });
-    const { planKey, email } = req.body || {};
-    const plan = plans[planKey];
-    if (!plan) return res.status(400).json({ error: 'Choose a valid plan.' });
-    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return res.status(400).json({ error: 'A valid account email is required.' });
-    const planId = plan.planId();
-    if (!planId || !planId.startsWith('plan_')) return res.status(503).json({ error: `Razorpay monthly plan ID missing for ${planKey}.` });
-    const subscription = await razorpay.subscriptions.create({ plan_id: planId, total_count: 120, quantity: 1, customer_notify: 1, notes: { product: 'GVRM CLOUD LMS', plan_key: planKey, account_email: email } });
-    await pool.query(`INSERT INTO lms_subscriptions(email,plan_key,razorpay_subscription_id,status) VALUES($1,$2,$3,$4) ON CONFLICT(razorpay_subscription_id) DO UPDATE SET email=EXCLUDED.email,updated_at=NOW()`, [email.toLowerCase(), planKey, subscription.id, subscription.status || 'created']);
-    res.json({ subscriptionId: subscription.id, keyId: process.env.RAZORPAY_KEY_ID, planName: plan.name, amount: plan.amount, currency: 'INR', email: email.toLowerCase() });
-  } catch (e) { console.error('Create subscription error:', e.message); res.status(502).json({ error: 'Could not create subscription with payment provider.' }); }
-});
-
-app.post('/api/subscriptions/verify', async (req,res) => {
-  try {
-    const { razorpay_payment_id: paymentId, razorpay_subscription_id: subscriptionId, razorpay_signature: signature } = req.body || {};
-    if (![paymentId, subscriptionId, signature].every(v => typeof v === 'string' && v.length < 500)) return res.status(400).json({ verified: false, error: 'Missing payment verification fields.' });
-    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || '').update(`${paymentId}|${subscriptionId}`).digest('hex');
-    const a = Buffer.from(expected); const b = Buffer.from(signature);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a,b)) return res.status(400).json({ verified: false, error: 'Payment signature verification failed.' });
-    // Signature confirms the checkout response; activation/status is updated from signed webhooks.
-    const result = await pool.query(`UPDATE lms_subscriptions SET status='authenticated',updated_at=NOW() WHERE razorpay_subscription_id=$1 RETURNING plan_key,status`, [subscriptionId]);
-    if (!result.rowCount) return res.status(404).json({ verified: false, error: 'Subscription record not found.' });
-    res.json({ verified: true, status: result.rows[0].status, planKey: result.rows[0].plan_key, message: 'Checkout signature verified. Final activation follows the provider webhook.' });
-  } catch (e) { console.error('Verify subscription error:', e.message); res.status(500).json({ verified: false, error: 'Verification failed.' }); }
-});
-
-app.get('/api/subscriptions/status', async (req,res) => {
-  // For production, protect this endpoint with your real user authentication and tenant authorization.
-  const email = String(req.query.email || '').toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Valid email required.' });
-  const result = await pool.query(`SELECT plan_key,status,current_start,current_end,created_at FROM lms_subscriptions WHERE email=$1 ORDER BY created_at DESC LIMIT 10`, [email]);
-  res.json({ subscriptions: result.rows });
-});
 app.listen(port, () => console.log(`GVRM CLOUD LMS API listening on ${port}`));
