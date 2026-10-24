@@ -246,8 +246,3 @@ wirePage = function(page) {
   if (page === 'Students') gvrmSetupStudentsCloudSync();
 };
 // END GVRM_STUDENTS_CLOUD_SYNC_V1
-const gvrmOriginalWirePage = wirePage;
-wirePage = function(page) {
-  gvrmOriginalWirePage(page);
-  if (page === 'Students') gvrmSetupStudentsCloudSync();
-};
